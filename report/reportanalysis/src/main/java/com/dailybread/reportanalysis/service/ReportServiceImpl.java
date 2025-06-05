@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.ArrayList; // New import
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 @RequiredArgsConstructor
@@ -54,6 +55,7 @@ public class ReportServiceImpl implements ReportService {
         return convertToDTO(entry);
     }
 
+    @Transactional
     @Override
     public void fetchAndGenerateReports() {
         // Fetch data from POS Microservice
