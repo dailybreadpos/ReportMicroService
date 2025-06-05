@@ -1,6 +1,8 @@
 package com.dailybread.reportanalysis.rest;
 
 import com.dailybread.reportanalysis.dto.ReportDTO;
+import com.dailybread.reportanalysis.dto.WeeklySalesData; // New import
+import com.dailybread.reportanalysis.dto.MonthlySalesData; // New import
 import com.dailybread.reportanalysis.service.ReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -28,5 +30,15 @@ public class ReportController {
     public String generateReports() {
         reportService.fetchAndGenerateReports();
         return "Reports generated from Inventory and POS.";
+    }
+
+    @GetMapping("/weekly") // New endpoint for weekly sales
+    public List<WeeklySalesData> getWeeklySales() {
+        return reportService.getWeeklySalesData();
+    }
+
+    @GetMapping("/monthly") // New endpoint for monthly sales
+    public List<MonthlySalesData> getMonthlySales() {
+        return reportService.getMonthlySalesData();
     }
 }
