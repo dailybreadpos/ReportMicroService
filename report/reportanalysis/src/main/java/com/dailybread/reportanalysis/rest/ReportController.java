@@ -1,8 +1,8 @@
 package com.dailybread.reportanalysis.rest;
 
 import com.dailybread.reportanalysis.dto.ReportDTO;
-import com.dailybread.reportanalysis.dto.WeeklySalesData; // New import
-import com.dailybread.reportanalysis.dto.MonthlySalesData; // New import
+import com.dailybread.reportanalysis.dto.WeeklySalesData;
+import com.dailybread.reportanalysis.dto.MonthlySalesData;
 import com.dailybread.reportanalysis.service.ReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
@@ -27,17 +27,19 @@ public class ReportController {
     }
 
     @PostMapping("/generate")
-    public String generateReports() {
-        reportService.fetchAndGenerateReports();
+    public String generateReports(
+            @RequestParam(required = false, defaultValue = "0") Integer offsetHours) {
+        // CORRECTED: Pass the offsetHours parameter to the service method
+        reportService.fetchAndGenerateReports(offsetHours);
         return "Reports generated from Inventory and POS.";
     }
 
-    @GetMapping("/weekly") // New endpoint for weekly sales
+    @GetMapping("/weekly")
     public List<WeeklySalesData> getWeeklySales() {
         return reportService.getWeeklySalesData();
     }
 
-    @GetMapping("/monthly") // New endpoint for monthly sales
+    @GetMapping("/monthly")
     public List<MonthlySalesData> getMonthlySales() {
         return reportService.getMonthlySalesData();
     }

@@ -1,14 +1,19 @@
 package com.dailybread.reportanalysis.dto;
 
+import lombok.AllArgsConstructor;
 import lombok.Data;
-import java.time.LocalDateTime;
+import lombok.NoArgsConstructor;
+
+import java.time.OffsetDateTime; // Changed from LocalDateTime if it was defined as such
 import java.util.List;
 
 @Data
+@NoArgsConstructor
+@AllArgsConstructor
 public class GetSaleResponse {
     private Long id;
     private float cash;
     private float digital;
-    private LocalDateTime date;
-    private List<SaleItem> items; // Using the updated SaleItem DTO
+    private OffsetDateTime date; // CRITICAL: Ensure this is OffsetDateTime
+    private List<SaleItem> items;
 }

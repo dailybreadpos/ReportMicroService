@@ -10,7 +10,7 @@ public interface ReportService {
 
     ReportDTO getReportByItem(String itemName);
 
-    void fetchAndGenerateReports(); // Fetch from Inventory + POS and save to DB
+    void fetchAndGenerateReports(Integer offsetHours); // Updated signature to accept offset
 
     List<WeeklySalesData> getWeeklySalesData(); // New method
 

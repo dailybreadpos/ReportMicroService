@@ -7,23 +7,25 @@ import com.dailybread.reportanalysis.exception.ResourceNotFoundException;
 import com.dailybread.reportanalysis.feign.InventoryClient;
 import com.dailybread.reportanalysis.feign.PosClient;
 import com.dailybread.reportanalysis.dto.Inventory;
-import com.dailybread.reportanalysis.dto.Sales;
+import com.dailybread.reportanalysis.dto.GetSaleResponse;
 import com.dailybread.reportanalysis.dto.SaleItem;
-import com.dailybread.reportanalysis.dto.WeeklySalesData; // New import
-import com.dailybread.reportanalysis.dto.MonthlySalesData; // New import
+import com.dailybread.reportanalysis.dto.WeeklySalesData;
+import com.dailybread.reportanalysis.dto.MonthlySalesData;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.DayOfWeek;
-import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime; // Import ZonedDateTime
 import java.time.temporal.WeekFields;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Collectors;
-import java.util.ArrayList; // New import
-import org.springframework.transaction.annotation.Transactional;
+import java.util.ArrayList;
 
 @Service
 @RequiredArgsConstructor
@@ -33,9 +35,6 @@ public class ReportServiceImpl implements ReportService {
     private final PosClient posClient;
     private final InventoryClient inventoryClient;
 
-    // In-memory storage for aggregated sales data (for demonstration)
-    // In a production app, this might be stored in the DB or re-calculated on
-    // demand
     private List<WeeklySalesData> cachedWeeklySales;
     private List<MonthlySalesData> cachedMonthlySales;
 
@@ -55,33 +54,61 @@ public class ReportServiceImpl implements ReportService {
         return convertToDTO(entry);
     }
 
-    @Transactional
     @Override
-    public void fetchAndGenerateReports() {
-        // Fetch data from POS Microservice
-        List<Sales> salesList = posClient.getAllSales();
+    @Transactional
+    public void fetchAndGenerateReports(Integer offsetHours) {
+        System.out.println("--- Starting report generation ---");
 
-        // Fetch data from Inventory Microservice
-        List<Inventory> inventoryList = inventoryClient.getAllInventory();
+        // Determine the ZoneOffset based on the provided offsetHours
+        // If offsetHours is null (e.g., direct call without param or testing), default
+        // to UTC (0)
+        ZoneOffset clientZoneOffset = ZoneOffset.ofHours(offsetHours != null ? offsetHours : 0);
+        System.out.println("REPORT_SERVICE: Client Zone Offset calculated: " + clientZoneOffset);
 
-        // Map inventory items by ID for easy lookup
+        List<GetSaleResponse> tempSalesList;
+        try {
+            tempSalesList = posClient.getAllSaleResponses();
+            System.out.println("REPORT_SERVICE: Fetched " + (tempSalesList != null ? tempSalesList.size() : 0)
+                    + " sales from POS.");
+        } catch (Exception e) {
+            System.err.println("REPORT_SERVICE: Error fetching sales from POS: " + e.getMessage());
+            e.printStackTrace();
+            tempSalesList = new ArrayList<>();
+        }
+        final List<GetSaleResponse> salesList = tempSalesList;
+
+        List<Inventory> tempInventoryList;
+        try {
+            tempInventoryList = inventoryClient.getAllInventory();
+            System.out.println("REPORT_SERVICE: Fetched " + (tempInventoryList != null ? tempInventoryList.size() : 0)
+                    + " inventory items from Inventory.");
+        } catch (Exception e) {
+            System.err.println("REPORT_SERVICE: Error fetching inventory from Inventory: " + e.getMessage());
+            e.printStackTrace();
+            tempInventoryList = new ArrayList<>();
+        }
+        final List<Inventory> inventoryList = tempInventoryList;
+
+        if (salesList.isEmpty() && inventoryList.isEmpty()) {
+            System.out.println("REPORT_SERVICE: No sales or inventory data available to generate reports.");
+            reportRepository.deleteAll();
+            cachedWeeklySales = new ArrayList<>();
+            cachedMonthlySales = new ArrayList<>();
+            return;
+        }
+
         Map<Long, Inventory> inventoryMap = inventoryList.stream()
                 .collect(Collectors.toMap(Inventory::getId, inventory -> inventory));
 
-        // Clear old reports for fresh generation
         reportRepository.deleteAll();
+        System.out.println("REPORT_SERVICE: Cleared existing reports from database.");
 
-        // Aggregate sales data and enrich with product details from inventory
         Map<String, Double> itemRevenue = salesList.stream()
                 .flatMap(sales -> sales.getItems().stream())
                 .collect(Collectors.groupingBy(item -> {
                     Inventory inv = inventoryMap.get(item.getItemId());
                     return inv != null ? inv.getName() : "Unknown Product (ID: " + item.getItemId() + ")";
-                }, Collectors.summingDouble(item -> {
-                    Inventory inv = inventoryMap.get(item.getItemId());
-                    double price = (inv != null) ? inv.getPrice() : 0.0; // Use actual price from inventory
-                    return item.getQuantity() * price;
-                })));
+                }, Collectors.summingDouble(item -> item.getQuantity() * item.getPrice())));
 
         Map<String, Integer> itemQuantitySold = salesList.stream()
                 .flatMap(sales -> sales.getItems().stream())
@@ -92,7 +119,6 @@ public class ReportServiceImpl implements ReportService {
 
         itemRevenue.forEach((itemName, totalRevenue) -> {
             Integer quantitySold = itemQuantitySold.getOrDefault(itemName, 0);
-            // Find the associated Inventory object by name to get its stock and category
             Inventory associatedInventory = inventoryList.stream()
                     .filter(inv -> inv.getName().equals(itemName))
                     .findFirst()
@@ -106,54 +132,86 @@ public class ReportServiceImpl implements ReportService {
                     .category(associatedInventory != null ? associatedInventory.getCategory() : "Unknown")
                     .build();
             reportRepository.save(reportEntry);
+            System.out.println("REPORT_SERVICE: Saved ReportEntry for: " + itemName + " (Qty: " + quantitySold
+                    + ", Revenue: " + totalRevenue + ")");
         });
 
-        // Aggregate weekly sales data and cache it
+        // --- Weekly Sales Aggregation ---
         Map<DayOfWeek, Double> weeklySalesMap = salesList.stream()
-                .collect(Collectors.groupingBy(sale -> sale.getDate().getDayOfWeek(),
-                        Collectors.summingDouble(sale -> sale.getCash() + sale.getDigital())));
+                .collect(Collectors.groupingBy(sale -> {
+                    // Convert the sale's UTC OffsetDateTime to ZonedDateTime in the client's
+                    // timezone
+                    ZonedDateTime zonedSaleDate = sale.getDate().atZoneSameInstant(clientZoneOffset);
+                    System.out.println("REPORT_SERVICE: Sale ID: " + sale.getId() +
+                            ", UTC Date: " + sale.getDate() +
+                            ", Zoned Date (" + clientZoneOffset + "): " + zonedSaleDate +
+                            ", DayOfWeek: " + zonedSaleDate.getDayOfWeek());
+                    return zonedSaleDate.getDayOfWeek(); // Get DayOfWeek in client's timezone
+                }, Collectors.summingDouble(sale -> sale.getCash() + sale.getDigital())));
 
         cachedWeeklySales = weeklySalesMap.entrySet().stream()
-                .map(entry -> new WeeklySalesData(entry.getKey().toString().substring(0, 3), entry.getValue())) // Shorten
-                                                                                                                // day
-                                                                                                                // name
+                .map(entry -> new WeeklySalesData(entry.getKey().toString().substring(0, 3), entry.getValue()))
                 .sorted(Comparator
-                        .comparingInt(data -> DayOfWeek.valueOf(data.getDay().toUpperCase(Locale.ROOT)).getValue())) // Sort
-                                                                                                                     // by
-                                                                                                                     // day
-                                                                                                                     // of
-                                                                                                                     // week
+                        .comparingInt(data -> DayOfWeek.valueOf(data.getDay().toUpperCase(Locale.ROOT)).getValue()))
                 .collect(Collectors.toList());
+        System.out.println("REPORT_SERVICE: Generated weekly sales data: " + cachedWeeklySales.size() + " entries.");
 
-        // Aggregate monthly sales data by week of month and cache it
+        // --- Monthly Sales Aggregation ---
+        // Get the current ZonedDateTime in the client's timezone for month comparison
+        ZonedDateTime currentClientZonedTime = ZonedDateTime.now(clientZoneOffset);
+        System.out.println("REPORT_SERVICE: Current client zoned time for monthly filter: " + currentClientZonedTime);
+
         Map<Integer, Double> monthlySalesByWeekMap = salesList.stream()
-                .filter(sale -> sale.getDate().getMonth() == LocalDateTime.now().getMonth()) // Filter for current month
+                .filter(sale -> {
+                    // Convert the sale's UTC OffsetDateTime to ZonedDateTime in the client's
+                    // timezone
+                    ZonedDateTime zonedSaleDate = sale.getDate().atZoneSameInstant(clientZoneOffset);
+                    // Filter for current month in client's timezone based on the
+                    // currentClientZonedTime
+                    boolean isInCurrentMonth = zonedSaleDate.getMonth() == currentClientZonedTime.getMonth();
+                    System.out.println("REPORT_SERVICE: Sale ID: " + sale.getId() +
+                            ", Zoned Sale Month: " + zonedSaleDate.getMonth() +
+                            ", Current Client Zoned Month: " + currentClientZonedTime.getMonth() +
+                            ", Is in current month: " + isInCurrentMonth);
+                    return isInCurrentMonth;
+                })
                 .collect(Collectors.groupingBy(sale -> {
+                    // Convert the sale's UTC OffsetDateTime to ZonedDateTime in the client's
+                    // timezone
+                    ZonedDateTime zonedSaleDate = sale.getDate().atZoneSameInstant(clientZoneOffset);
                     WeekFields weekFields = WeekFields.of(Locale.getDefault());
-                    return sale.getDate().get(weekFields.weekOfMonth());
+                    int weekOfMonth = zonedSaleDate.get(weekFields.weekOfMonth()); // Get week of month in client's
+                                                                                   // timezone
+                    System.out.println("REPORT_SERVICE: Sale ID: " + sale.getId() + ", Week of Month in client zone: "
+                            + weekOfMonth);
+                    return weekOfMonth;
                 }, Collectors.summingDouble(sale -> sale.getCash() + sale.getDigital())));
 
         cachedMonthlySales = monthlySalesByWeekMap.entrySet().stream()
                 .map(entry -> new MonthlySalesData("W" + entry.getKey(), entry.getValue()))
-                .sorted(Comparator.comparingInt(data -> Integer.parseInt(data.getWeek().substring(1)))) // Sort by week
-                                                                                                        // number
+                .sorted(Comparator.comparingInt(data -> Integer.parseInt(data.getWeek().substring(1))))
                 .collect(Collectors.toList());
+        System.out.println("REPORT_SERVICE: Generated monthly sales data: " + cachedMonthlySales.size() + " entries.");
+
+        System.out.println("--- Report generation completed ---");
     }
 
     @Override
     public List<WeeklySalesData> getWeeklySalesData() {
-        // Ensure data is generated before returning
         if (cachedWeeklySales == null || cachedWeeklySales.isEmpty()) {
-            fetchAndGenerateReports(); // Re-generate if not available
+            System.out.println("REPORT_SERVICE: Weekly sales cache is empty, attempting to generate reports.");
+            // Default to UTC (0 offset) if not explicitly passed when calling this method
+            fetchAndGenerateReports(0);
         }
         return cachedWeeklySales;
     }
 
     @Override
     public List<MonthlySalesData> getMonthlySalesData() {
-        // Ensure data is generated before returning
         if (cachedMonthlySales == null || cachedMonthlySales.isEmpty()) {
-            fetchAndGenerateReports(); // Re-generate if not available
+            System.out.println("REPORT_SERVICE: Monthly sales cache is empty, attempting to generate reports.");
+            // Default to UTC (0 offset) if not explicitly passed when calling this method
+            fetchAndGenerateReports(0);
         }
         return cachedMonthlySales;
     }
